@@ -7,7 +7,8 @@ use ratatui::{
 use std::{env, thread::sleep};
 use tui_input::Input;
 
-use crate::app::app::{App, CurrentScreen, ModeType};
+use crate::app::app::{App, ModeType};
+use crate::router::route::CurrentScreen;
 
 #[derive(Default)]
 pub struct DrawUI {

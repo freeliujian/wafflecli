@@ -1,2 +1,1 @@
-pub mod ui;
-mod logo;
+pub mod logo;

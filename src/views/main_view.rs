@@ -1,20 +1,27 @@
 use crate::app::app::ModeType;
 use crate::router::route::PageStatus;
-use crate::router::{
-    route::CurrentScreen,
-    router::{Action, Router},
-    screen::Screen,
-};
+use crate::router::{router::Action, screen::Screen};
 use indoc::formatdoc;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
-use ratatui::symbols::{block, border};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use std::env;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
+
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: MessageRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
 
 #[derive(Debug, Clone)]
 pub struct SelectItem {
@@ -36,6 +43,10 @@ pub struct MainScreen {
     filtered_items: Vec<SelectItem>,
     select_scroll_offset: usize,
     select_visible_count: usize,
+    messages: Vec<ChatMessage>,
+    content_scroll: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
 }
 
 impl MainScreen {
@@ -58,12 +69,14 @@ impl MainScreen {
                 description: "查看技能列表".to_string(),
             },
         ];
+
         let version = env!("CARGO_PKG_VERSION").into();
         let current_dir = env::current_dir().expect("没有找到当前目录");
         let dir_name = current_dir.to_string_lossy().into_owned();
         let init_input_value = String::new();
 
         let input = Input::new(init_input_value.clone());
+
         MainScreen {
             version,
             dir_name,
@@ -81,6 +94,10 @@ impl MainScreen {
             },
             select_scroll_offset: 0,
             select_visible_count: 5,
+            messages: vec![],
+            content_scroll: 0,
+            history: vec![],
+            history_index: None,
         }
     }
 
@@ -90,6 +107,151 @@ impl MainScreen {
 
     pub fn get_page_status(&mut self) -> PageStatus {
         self.page_status
+    }
+
+    pub fn add_user_message(&mut self, content: String) {
+        if !content.trim().is_empty() {
+            self.messages.push(ChatMessage {
+                role: MessageRole::User,
+                content,
+            });
+            self.scroll_to_bottom();
+        }
+    }
+
+    pub fn add_assistant_message(&mut self, content: String) {
+        self.messages.push(ChatMessage {
+            role: MessageRole::Assistant,
+            content,
+        });
+        self.scroll_to_bottom();
+    }
+
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.content_scroll = 0;
+    }
+
+    pub fn scroll_up(&mut self) {
+        if self.content_scroll > 0 {
+            self.content_scroll = self.content_scroll.saturating_sub(1);
+        }
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.content_scroll = self.content_scroll.saturating_add(1);
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.content_scroll = usize::MAX;
+    }
+}
+
+impl MainScreen {
+    fn render_wrapper(&self, f: &mut Frame) {
+        let header_height = 5;
+        let select_height = if self.show_select {
+            self.select_visible_count as u16 + 2
+        } else {
+            0
+        };
+        let footer_height = 3 + select_height + 3;
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Min(4),
+                Constraint::Length(footer_height),
+            ])
+            .split(f.area());
+
+        self.create_header(f, &chunks[0]);
+        self.create_content(f, &chunks[1]);
+        self.create_footer(f, &chunks[2]);
+    }
+
+    fn create_content(&self, f: &mut Frame, chunk: &Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title("Conversation");
+
+        let inner_area = block.inner(*chunk);
+
+        if self.messages.is_empty() {
+            let welcome_text =
+                "欢迎使用 waffle CLI！\n\n输入消息开始对话...\n支持 /help、/clear 等命令。";
+            let welcome = Paragraph::new(welcome_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center)
+                .block(block);
+
+            f.render_widget(welcome, *chunk);
+            return;
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        for msg in &self.messages {
+            match msg.role {
+                MessageRole::User => {
+                    let prefix = Span::styled("> ", Style::default().fg(Color::Yellow).bold());
+                    let content = Span::styled(&msg.content, Style::default().fg(Color::White));
+                    lines.push(Line::from(vec![prefix, content]));
+                    lines.push(Line::from(""));
+                }
+                MessageRole::Assistant => {
+                    let prefix = Span::styled("AI: ", Style::default().fg(Color::Cyan).bold());
+                    let content = Span::styled(&msg.content, Style::default().fg(Color::Gray));
+                    lines.push(Line::from(vec![prefix, content]));
+                    lines.push(Line::from(""));
+                }
+            }
+        }
+
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .scroll((self.content_scroll as u16, 0));
+
+        f.render_widget(paragraph, *chunk);
+
+        if self.messages.len() > 5 {
+            let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
+
+            let mut scrollbar_state = ScrollbarState::new(self.messages.len() * 2)
+                .position(self.content_scroll)
+                .viewport_content_length(inner_area.height as usize);
+
+            f.render_stateful_widget(scrollbar, *chunk, &mut scrollbar_state);
+        }
+    }
+
+    fn create_header(&self, f: &mut Frame, chunk: &Rect) {
+        let title_width = 50;
+        let welcome = String::from("Welcome to waffle CLI!");
+
+        let block_area = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(title_width)])
+            .split(*chunk)[0];
+
+        let title_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let title_lines = vec![
+            Line::from(vec![
+                Span::from(format!("{} {}", welcome, self.version)).green(),
+            ]),
+            Line::from(" "),
+            Line::from(vec![
+                Span::from(format!("cwd: {}", self.dir_name)).dark_gray(),
+            ]),
+        ];
+
+        let title = Paragraph::new(title_lines).block(title_block);
+        f.render_widget(title, block_area);
     }
 }
 
@@ -103,6 +265,7 @@ impl MainScreen {
             0
         };
         let help_height = 3;
+
         let footer_area = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -144,74 +307,7 @@ impl MainScreen {
 
         f.render_widget(help_content, *chunk);
     }
-}
 
-impl MainScreen {
-    fn render_wrapper(&self, f: &mut Frame) {
-        // let area_height = f.area().height;
-        let header_height = 5;
-        let select_height = if self.show_select {
-            self.select_visible_count as u16 + 2
-        } else {
-            0
-        };
-        let footer_height = 3 + select_height + 3;
-        // let content_height = area_height.saturating_sub(header_height + footer_height);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(header_height),
-                Constraint::Min(4),
-                Constraint::Length(footer_height),
-            ])
-            .split(f.area());
-        self.create_header(f, &chunks[0]);
-        self.create_content(f, &chunks[1]);
-        self.create_footer(f, &chunks[2])
-    }
-
-    fn create_content(&self, f: &mut Frame, chunk: &Rect) {
-        let content_width = 120;
-        let description = String::from("这是一个仿照qodercli的命令行工具，这里是描述段落");
-        let description_area = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(content_width), Constraint::Fill(1)])
-            .split(*chunk)[0];
-        let content_block = Block::default();
-        let content = Paragraph::new(description).block(content_block);
-        f.render_widget(content, description_area);
-    }
-
-    fn create_header(&self, f: &mut Frame, chunk: &Rect) {
-        let title_width = 50;
-        let welcome = String::from("Welcome to waffle CLI!");
-
-        let block_area = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(title_width)])
-            .split(*chunk)[0];
-
-        let title_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
-
-        let title_lines = vec![
-            Line::from(vec![
-                Span::from(format!("{} {}", welcome, self.version)).green(),
-            ]),
-            Line::from(" "),
-            Line::from(vec![
-                Span::from(format!("cwd: {}", self.dir_name)).dark_gray(),
-            ]),
-        ];
-
-        let title = Paragraph::new(title_lines).block(title_block);
-
-        f.render_widget(title, block_area);
-    }
-}
-
-impl MainScreen {
     fn create_input(&self, f: &mut Frame, chunk: &Rect) {
         let width = chunk.width.max(3) - 3;
         let scroll = self.input.visual_scroll(width as usize);
@@ -219,10 +315,11 @@ impl MainScreen {
             .style(Style::default())
             .scroll((0, scroll as u16))
             .block(Block::bordered().title("Type your message..."));
+
         f.render_widget(input, *chunk);
 
         let x = self.input.visual_cursor().max(scroll) - scroll + 1;
-        f.set_cursor_position((chunk.x + x as u16, chunk.y + 1))
+        f.set_cursor_position((chunk.x + x as u16, chunk.y + 1));
     }
 
     fn save_current_value(&mut self) {
@@ -248,8 +345,6 @@ impl MainScreen {
         }
 
         let start = self.select_scroll_offset;
-        let end = (start + visible).min(total_items);
-
         let items: Vec<ListItem> = self
             .filtered_items
             .iter()
@@ -257,9 +352,8 @@ impl MainScreen {
             .skip(start)
             .take(visible)
             .map(|(idx, item)| {
-                let global_idx = idx;
                 let content = format!(" {} - {}", item.command, item.description);
-                let style = if global_idx == self.selected_index {
+                let style = if idx == self.selected_index {
                     Style::default()
                         .bg(Color::LightGreen)
                         .fg(Color::White)
@@ -272,17 +366,12 @@ impl MainScreen {
             .collect();
 
         let list_block = Block::new().title("Commands");
-
         let select_list = List::new(items).block(list_block);
 
         f.render_widget(select_list, *chunk);
 
         if total_items > visible {
-            let scrollbar = Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-
+            let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
             let mut scrollbar_state = ScrollbarState::new(total_items)
                 .position(self.selected_index)
                 .viewport_content_length(visible);
@@ -294,7 +383,6 @@ impl MainScreen {
     fn update_scroll(&mut self) {
         let visible = self.select_visible_count;
         let total = self.filtered_items.len();
-        println!("visible:{},total:{}", visible, total);
         if total <= visible {
             self.select_scroll_offset = 0;
         } else {
@@ -379,6 +467,20 @@ impl Screen for MainScreen {
             return Action::None;
         }
 
+        if !self.show_select {
+            match key.code {
+                KeyCode::Up => {
+                    self.scroll_up();
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    self.scroll_down();
+                    return Action::None;
+                }
+                _ => {}
+            }
+        }
+
         if self.show_select {
             match key.code {
                 KeyCode::Down | KeyCode::Tab => {
@@ -390,11 +492,16 @@ impl Screen for MainScreen {
                     return Action::None;
                 }
                 KeyCode::Enter => {
-                    if let Some(item) = self.current_item() {
-                        self.input_value = item.command.clone();
+                    let message = self.input.value().trim().to_string();
+                    if !message.is_empty() {
+                        if self.history.last() != Some(&message) {
+                            self.history.push(message.clone());
+                        }
+                        self.add_user_message(message);
+                        self.history_index = None;
                     }
-                    self.show_select = false;
-                    return Action::None;
+                    self.save_current_value();
+                    return Action::None
                 }
                 KeyCode::Esc => {
                     self.show_select = false;
@@ -406,6 +513,10 @@ impl Screen for MainScreen {
 
         match key.code {
             KeyCode::Enter => {
+                let message = self.input.value().trim().to_string();
+                if !message.is_empty() {
+                    self.add_user_message(message);
+                }
                 self.save_current_value();
                 Action::None
             }

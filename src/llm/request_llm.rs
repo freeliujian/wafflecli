@@ -1,4 +1,3 @@
-use indoc::indoc;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -40,6 +39,19 @@ struct Usage {
     total_tokens: u32,
 }
 
+enum MessagesStateManage {
+    Generating,
+    Thinking,
+    Stream,
+    ToolCalling,
+    ToolExecuting,
+    TollResult,
+    WaitingUser,
+    Completed,
+    Error,
+    Cancelled,
+}
+
 pub async fn request_llm() -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let api_key = "";
@@ -65,24 +77,11 @@ pub async fn request_llm() -> Result<(), Box<dyn Error>> {
         .json(&request_body)
         .send()
         .await?;
-    // let text = resp.text().await?;
     let result: ChatResponse = resp.json().await?;
-    // println!("原始响应: {}", text);
 
     if let Some(usage) = result.usage {
         println!("Token 使用: {}", usage.total_tokens);
     }
 
     Ok(())
-}
-
-fn basic_creator_skill() {
-    let skill_str = indoc! {
-        "
-        ---
-        skill_name: qodercli_creator_skill
-        description: 这是一个用于 QoderCLI 的元技能（meta-skill），能够根据用户需求自动生成新的 skill 文件，并确保符合 QoderCLI 的 skill 规范。
-        ---
-        "
-    };
 }

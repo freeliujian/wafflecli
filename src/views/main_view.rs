@@ -170,7 +170,8 @@ impl MainScreen {
         self.create_content(f, &chunks[1]);
         self.create_footer(f, &chunks[2]);
     }
-
+    
+    // 有bug
     fn create_content(&self, f: &mut Frame, chunk: &Rect) {
         let block = Block::default()
             .borders(Borders::ALL)

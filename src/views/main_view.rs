@@ -10,6 +10,7 @@ use ratatui::widgets::{
 use std::env;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
+use crate::llm::request_llm;
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {

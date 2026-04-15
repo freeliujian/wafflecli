@@ -1,26 +1,38 @@
-use ratatui::symbols::block;
-use ratatui::widgets::List;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::error::Error;
-use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use subprocess::*;
 use tokio::process::Command;
 use tokio::time::timeout;
+
+#[derive(Serialize, Debug, Clone)]
+struct Tool {
+    #[serde(rename = "type")]
+    type_: String,
+    function: ToolFunction,
+}
+
+#[derive(Serialize, Debug, Clone)]
+struct ToolFunction {
+    name: String,
+    description: String,
+    parameters: Value,
+}
 
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     temperature: Option<f32>,
-    max_token: Option<u32>,
+    max_tokens: Option<u32>,
+    tools: Option<Vec<Tool>>,
+    tool_choice: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct Message {
     role: String,
     content: String,
@@ -39,7 +51,22 @@ struct ChatResponse {
 
 #[derive(Deserialize, Debug)]
 struct MessageResponse {
-    content: String,
+    content: Option<String>,
+    tool_calls: Option<Vec<ToolCall>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    type_: String,
+    function: ToolCallFunction,
+}
+
+#[derive(Deserialize, Debug)]
+struct ToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -69,64 +96,22 @@ enum MessagesStateManage {
     Error,
     Cancelled,
 }
-
-pub async fn request_llm() -> Result<(), Box<dyn Error>> {
-    let client = reqwest::Client::new();
-    let api_key = "";
-    let request_body = ChatRequest {
-        model: "kimi-k2.5".to_string(),
-        messages: vec![
-            Message {
-                role: "system".to_string(),
-                content: "你是一个有帮助的 AI 助手。".to_string(),
-            },
-            Message {
-                role: "user".to_string(),
-                content: "Rust 如何实现一个简单的 CLI 工具？".to_string(),
-            },
-        ],
-        temperature: Some(1.0),
-        max_token: Some(2048),
-    };
-    let resp = client
-        .post("https://api.moonshot.cn/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .send()
-        .await?;
-    let result: ChatResponse = resp.json().await?;
-
-    if let Some(usage) = result.usage {
-        println!("Token 使用: {}", usage.total_tokens);
-    }
-
-    Ok(())
-}
-
-fn agents() {
-    let current_dir = env::current_dir().expect("没有找到当前目录");
-    let dir_name = current_dir.to_string_lossy().into_owned();
-    let system = format!(
-        "You are a coding agent at {cwd}. 
-        Use bash to inspect and change the workspace. Act first, then report clearly.",
-        cwd = dir_name
-    );
-}
-
-#[derive(Serialize)]
-struct LoopState {
-    messages: Vec<Message>,
+#[derive(Clone)]
+pub struct LoopState {
+    pub messages: Vec<Message>,
     turn_count: i32,
     transition_reason: Option<String>,
+    client: reqwest::Client,
 }
 
 impl LoopState {
-    fn new(list: Vec<Message>) -> Self {
+    pub fn new(list: Vec<Message>) -> Self {
+        let client = reqwest::Client::new();
         LoopState {
             messages: list,
             turn_count: 1,
             transition_reason: None,
+            client,
         }
     }
 
@@ -197,7 +182,6 @@ impl LoopState {
                 }
             };
 
-
             let tool_id = block
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -237,14 +221,141 @@ impl LoopState {
         Ok(results)
     }
 
-    fn run_one_turn(&mut self, state: &LoopState) -> Option<bool> {
-        None
+    async fn run_one_turn(&mut self) -> Result<Option<Vec<ToolResult>>, Box<dyn Error>> {
+        let tool = Tool {
+            type_: String::from("function"),
+            function: ToolFunction {
+                name: String::from("bash"),
+                description: String::from("Run a shell command in the current workspace."),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        };
+
+        let client = self.client.clone();
+        let api_key = env::var("MOONSHOT_API_KEY").unwrap_or_default();
+        let current_dir = env::current_dir().unwrap_or_default();
+        let env_path = current_dir.to_string_lossy().into_owned();
+
+        let system_prompt = format!(
+            "You are a coding agent at {}. Use bash to inspect and change the workspace. Act first, then report clearly.",
+            env_path
+        );
+
+        let mut all_messages = vec![Message {
+            role: "system".to_string(),
+            content: system_prompt,
+        }];
+        let cp_messages = self.messages.clone();
+        all_messages.extend(cp_messages);
+
+        let request_body = ChatRequest {
+            model: "kimi-k2.5".to_string(),
+            messages: all_messages,
+            temperature: Some(1.0),
+            max_tokens: Some(8000),
+            tools: Some(vec![tool]),
+            tool_choice: Some("auto".to_string()),
+        };
+
+        let resp = client
+            .post("https://api.moonshot.cn/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let result: ChatResponse = resp.json().await?;
+
+        if let Some(choice) = result.choices.first() {
+            let message = &choice.message;
+
+            if let Some(content) = &message.content {
+                self.messages.push(Message {
+                    role: "assistant".to_string(),
+                    content: content.clone(),
+                });
+            }
+
+            if let Some(tool_calls) = &message.tool_calls {
+                println!("模型请求调用工具:");
+                for tool_call in tool_calls {
+                    println!(
+                        "  - 工具: {}, 参数: {}",
+                        tool_call.function.name, tool_call.function.arguments
+                    );
+                }
+
+                let tool_calls_value: Vec<Value> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "input": {
+                                "command": tc.function.arguments
+                            }
+                        })
+                    })
+                    .collect();
+
+                let tool_results = Self::execute_tool_calls(tool_calls_value).await?;
+
+                for result in &tool_results {
+                    self.messages.push(Message {
+                        role: "user".to_string(),
+                        content: format!(
+                            "Tool result ({}): {}",
+                            result.tool_use_id, result.content
+                        ),
+                    });
+                }
+
+                if let Some(usage) = result.usage {
+                    println!("Token 使用: {}", usage.total_tokens);
+                }
+
+                return Ok(Some(tool_results));
+            }
+
+            if let Some(usage) = result.usage {
+                println!("Token 使用: {}", usage.total_tokens);
+            }
+        }
+
+        Ok(None)
     }
 
-    fn agent_loop(&mut self, state: LoopState) -> Option<bool> {
+    pub async fn agent_loop(&mut self) -> Result<(), Box<dyn Error>> {
         loop {
-            self.run_one_turn(&state);
+            match self.run_one_turn().await {
+                Ok(Some(_)) => {
+                    self.turn_count += 1;
+                    if self.turn_count > 10 {
+                        self.transition_reason = Some("达到最大轮数限制".to_string());
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    self.transition_reason = Some("对话自然结束".to_string());
+                    break;
+                }
+                Err(e) => {
+                    self.transition_reason = Some(format!("错误: {}", e));
+                    return Err(e);
+                }
+            }
         }
+        Ok(())
     }
 }
 

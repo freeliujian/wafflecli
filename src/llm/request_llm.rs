@@ -1,3 +1,4 @@
+use ratatui::symbols::block;
 use ratatui::widgets::List;
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,14 @@ struct Usage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+}
+
+#[derive(Serialize, Debug)]
+struct ToolResult {
+    #[serde(rename = "type")]
+    type_: String,
+    tool_use_id: String,
+    content: String,
 }
 
 enum MessagesStateManage {
@@ -147,9 +156,7 @@ impl LoopState {
 
         for block in content {
             let text = match block {
-                Value::Object(map) => {
-                    map.get("text").and_then(|v| v.as_str())
-                },
+                Value::Object(map) => map.get("text").and_then(|v| v.as_str()),
                 _ => None,
             };
 
@@ -163,22 +170,84 @@ impl LoopState {
         Some(texts.join("\n").trim().to_string())
     }
 
-    fn execute_tool_calls(response_content: Vec<ChatResponse>)  {
+    async fn execute_tool_calls(
+        response_content: Vec<Value>,
+    ) -> Result<Vec<ToolResult>, Box<dyn Error>> {
+        let mut results = Vec::new();
 
+        for block in response_content {
+            let type_str = match block.get("type").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            if type_str != "tool_use" {
+                continue;
+            }
+
+            let command = match block
+                .get("input")
+                .and_then(|i| i.get("command"))
+                .and_then(|c| c.as_str())
+            {
+                Some(cmd) => cmd.to_string(),
+                None => {
+                    eprintln!("Warning: tool_use block missing command");
+                    continue;
+                }
+            };
+
+
+            let tool_id = block
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            println!("\x1b[33m$ {}\x1b[0m", command);
+
+            match LoopState::run_bash(command).await {
+                Ok(output) => {
+                    let display_output = if output.len() > 200 {
+                        &output[..200]
+                    } else {
+                        &output
+                    };
+                    println!("{}", display_output);
+
+                    results.push(ToolResult {
+                        type_: "tool_result".to_string(),
+                        tool_use_id: tool_id,
+                        content: output,
+                    });
+                }
+                Err(e) => {
+                    let error_msg = format!("Error: {}", e);
+                    eprintln!("{}", error_msg);
+
+                    results.push(ToolResult {
+                        type_: "tool_result".to_string(),
+                        tool_use_id: tool_id,
+                        content: error_msg,
+                    });
+                }
+            }
+        }
+
+        Ok(results)
     }
 
-    fn run_one_turn(&mut self, state:&LoopState) -> Option<bool> {
+    fn run_one_turn(&mut self, state: &LoopState) -> Option<bool> {
         None
     }
 
-    fn agent_loop(&mut self, state:LoopState) -> Option<bool> {
+    fn agent_loop(&mut self, state: LoopState) -> Option<bool> {
         loop {
             self.run_one_turn(&state);
         }
     }
-
-
 }
+
 async fn run_command_with_timeout(command: &str, timeout_secs: u64) -> Result<String, String> {
     let child = Command::new("sh")
         .arg("-c")

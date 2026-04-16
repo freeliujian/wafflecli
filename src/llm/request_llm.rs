@@ -1,12 +1,10 @@
 use reqwest;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::env;
 use std::error::Error;
-use std::process::Stdio;
-use std::time::Duration;
-use tokio::process::Command;
-use tokio::time::timeout;
+
+use crate::tools::run_bash;
 
 #[derive(Serialize, Debug, Clone)]
 struct Tool {
@@ -115,22 +113,6 @@ impl LoopState {
         }
     }
 
-    async fn run_bash(command: String) -> Result<String, Box<dyn Error>> {
-        let dangerous_pattern: Vec<String> = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-            .map(String::from)
-            .to_vec();
-        for pattern in dangerous_pattern.iter() {
-            if command.contains(pattern) {
-                return Err(
-                    format!("Error: Dangerous command blocked (found: {})", pattern).into(),
-                );
-            }
-        }
-
-        let output = run_command_with_timeout(&command, 120).await?;
-        Ok(output)
-    }
-
     fn extract_text(&mut self, content: Option<&[Value]>) -> Option<String> {
         let content: &[Value] = match content {
             Some(list) if !list.is_empty() => list,
@@ -191,7 +173,7 @@ impl LoopState {
 
             println!("\x1b[33m$ {}\x1b[0m", command);
 
-            match LoopState::run_bash(command).await {
+            match run_bash(command).await {
                 Ok(output) => {
                     let display_output = if output.len() > 200 {
                         &output[..200]
@@ -228,7 +210,7 @@ impl LoopState {
             function: ToolFunction {
                 name: String::from("bash"),
                 description: String::from("Run a shell command in the current workspace."),
-                parameters: serde_json::json!({
+                parameters: json!({
                     "type": "object",
                     "properties": {
                         "command": {
@@ -364,37 +346,6 @@ impl LoopState {
         }
         Ok(())
     }
-}
-
-async fn run_command_with_timeout(command: &str, timeout_secs: u64) -> Result<String, String> {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(std::env::current_dir().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    let output = match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => return Err(e.to_string()),
-        Err(_) => {
-            return Err(format!("Command timed out after {} seconds", timeout_secs));
-        }
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
-            "Command failed (code: {}): {}",
-            output.status.code().unwrap_or(-1),
-            stderr
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(stdout)
 }
 
 pub async fn run_agent_from_pairs(

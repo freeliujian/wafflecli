@@ -3,6 +3,7 @@ mod llm;
 mod router;
 mod ui;
 mod views;
+mod tools;
 
 use ratatui::Terminal;
 use ratatui::crossterm::event;

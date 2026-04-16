@@ -1,12 +1,13 @@
 mod app;
 mod llm;
 mod router;
-mod views;
 mod ui;
+mod views;
 
 use ratatui::Terminal;
+use ratatui::crossterm::event;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
 };
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -35,7 +36,6 @@ where
         if app.router.should_quit {
             return Ok(false);
         }
-
     }
 }
 

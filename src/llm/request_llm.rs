@@ -33,9 +33,9 @@ struct ChatRequest {
 }
 
 #[derive(Serialize, Clone)]
-struct Message {
-    role: String,
-    content: String,
+pub struct Message {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -132,7 +132,7 @@ impl LoopState {
     }
 
     fn extract_text(&mut self, content: Option<&[Value]>) -> Option<String> {
-        let content = match content {
+        let content: &[Value] = match content {
             Some(list) if !list.is_empty() => list,
             _ => return Some(String::new()),
         };
@@ -156,6 +156,7 @@ impl LoopState {
     }
 
     async fn execute_tool_calls(
+        &self,
         response_content: Vec<Value>,
     ) -> Result<Vec<ToolResult>, Box<dyn Error>> {
         let mut results = Vec::new();
@@ -241,7 +242,7 @@ impl LoopState {
         };
 
         let client = self.client.clone();
-        let api_key = env::var("MOONSHOT_API_KEY").unwrap_or_default();
+        let api_key: String = String::from("sk-ieTXY0Hs8XH8OUUhoKAAfoJPlJF2K5k52d9Vbg8MVOwKRC9J");
         let current_dir = env::current_dir().unwrap_or_default();
         let env_path = current_dir.to_string_lossy().into_owned();
 
@@ -273,6 +274,12 @@ impl LoopState {
             .json(&request_body)
             .send()
             .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let error_text = resp.text().await.unwrap_or_default();
+            return Err(format!("Moonshot 错误，status 为：{}: {}", status, error_text).into());
+        }
 
         let result: ChatResponse = resp.json().await?;
 
@@ -308,7 +315,7 @@ impl LoopState {
                     })
                     .collect();
 
-                let tool_results = Self::execute_tool_calls(tool_calls_value).await?;
+                let tool_results = self.execute_tool_calls(tool_calls_value).await?;
 
                 for result in &tool_results {
                     self.messages.push(Message {
@@ -332,7 +339,7 @@ impl LoopState {
             }
         }
 
-        Ok(None)
+        Err("调用失败".into())
     }
 
     pub async fn agent_loop(&mut self) -> Result<(), Box<dyn Error>> {
@@ -388,4 +395,24 @@ async fn run_command_with_timeout(command: &str, timeout_secs: u64) -> Result<St
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(stdout)
+}
+
+pub async fn run_agent_from_pairs(
+    messages: Vec<(String, String)>,
+) -> Result<Vec<(String, String)>, Box<dyn Error>> {
+    let list: Vec<Message> = messages
+        .into_iter()
+        .map(|(role, content)| Message { role, content })
+        .collect();
+
+    let mut state = LoopState::new(list);
+    state.agent_loop().await?;
+
+    let out = state
+        .messages
+        .into_iter()
+        .map(|m| (m.role, m.content))
+        .collect();
+
+    Ok(out)
 }

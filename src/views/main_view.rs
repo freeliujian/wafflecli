@@ -1,4 +1,5 @@
 use crate::app::app::ModeType;
+use crate::llm::request_llm;
 use crate::router::route::PageStatus;
 use crate::router::{router::Action, screen::Screen};
 use indoc::formatdoc;
@@ -10,7 +11,6 @@ use ratatui::widgets::{
 use std::env;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
-use crate::llm::request_llm;
 
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
@@ -171,8 +171,7 @@ impl MainScreen {
         self.create_content(f, &chunks[1]);
         self.create_footer(f, &chunks[2]);
     }
-    
-    // 有bug
+
     fn create_content(&self, f: &mut Frame, chunk: &Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -198,13 +197,14 @@ impl MainScreen {
         for msg in &self.messages {
             match msg.role {
                 MessageRole::User => {
-                    let prefix = Span::styled("> ", Style::default().fg(Color::Yellow).bold());
+                    let prefix: Span<'_> =
+                        Span::styled("> ", Style::default().fg(Color::Yellow).bold());
                     let content = Span::styled(&msg.content, Style::default().fg(Color::White));
                     lines.push(Line::from(vec![prefix, content]));
                     lines.push(Line::from(""));
                 }
                 MessageRole::Assistant => {
-                    let prefix = Span::styled("AI: ", Style::default().fg(Color::Cyan).bold());
+                    let prefix = Span::styled("● ", Style::default().fg(Color::Cyan).bold());
                     let content = Span::styled(&msg.content, Style::default().fg(Color::Gray));
                     lines.push(Line::from(vec![prefix, content]));
                     lines.push(Line::from(""));
@@ -212,18 +212,31 @@ impl MainScreen {
             }
         }
 
+        let total_lines = lines.len();
+        let viewport_height = inner_area.height as usize;
+        let max_scroll = if total_lines > viewport_height {
+            total_lines - viewport_height
+        } else {
+            0
+        };
+        let scroll_pos = if self.content_scroll == usize::MAX {
+            max_scroll
+        } else {
+            self.content_scroll.min(max_scroll)
+        };
+
         let paragraph = Paragraph::new(lines)
             .block(block)
-            .scroll((self.content_scroll as u16, 0));
+            .scroll((scroll_pos as u16, 0));
 
         f.render_widget(paragraph, *chunk);
 
-        if self.messages.len() > 5 {
+        if total_lines > viewport_height {
             let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
 
-            let mut scrollbar_state = ScrollbarState::new(self.messages.len() * 2)
-                .position(self.content_scroll)
-                .viewport_content_length(inner_area.height as usize);
+            let mut scrollbar_state = ScrollbarState::new(total_lines)
+                .position(scroll_pos)
+                .viewport_content_length(viewport_height);
 
             f.render_stateful_widget(scrollbar, *chunk, &mut scrollbar_state);
         }
@@ -469,41 +482,62 @@ impl Screen for MainScreen {
             return Action::None;
         }
 
-        if !self.show_select {
+        if self.show_select {
             match key.code {
                 KeyCode::Up => {
-                    self.scroll_up();
+                    self.select_previous();
+                    self.update_scroll();
                     return Action::None;
                 }
                 KeyCode::Down => {
-                    self.scroll_down();
+                    self.select_next();
+                    self.update_scroll();
                     return Action::None;
                 }
                 _ => {}
             }
-        }
-
-        if self.show_select {
+        } else {
             match key.code {
-                KeyCode::Down | KeyCode::Tab => {
-                    self.select_next();
-                    return Action::None;
-                }
-                KeyCode::Up => {
-                    self.select_previous();
-                    return Action::None;
-                }
                 KeyCode::Enter => {
-                    let message = self.input.value().trim().to_string();
+                    let message: String = self.input.value().trim().to_string();
                     if !message.is_empty() {
                         if self.history.last() != Some(&message) {
                             self.history.push(message.clone());
                         }
-                        self.add_user_message(message);
+                        self.add_user_message(message.clone());
                         self.history_index = None;
+
+                        self.add_assistant_message("AI 正在思考...".to_string());
+
+                        let msgs_clone: Vec<(String, String)> = self
+                            .messages
+                            .iter()
+                            .map(|m| {
+                                (
+                                    match m.role {
+                                        MessageRole::User => "user".to_string(),
+                                        MessageRole::Assistant => "assistant".to_string(),
+                                    },
+                                    m.content.clone(),
+                                )
+                            })
+                            .collect();
+
+                        // tokio::spawn(async move {
+                        //     match request_llm::run_agent_from_pairs(msgs_clone).await {
+                        //         Ok(res_msgs) => {
+                        //             for (role, content) in res_msgs {
+                        //                 println!("[{}] {}", role, content);
+                        //             }
+                        //         }
+                        //         Err(e) => {
+                        //             eprintln!("LLM 调用错误: {}", e);
+                        //         }
+                        //     }
+                        // });
                     }
                     self.save_current_value();
-                    return Action::None
+                    return Action::None;
                 }
                 KeyCode::Esc => {
                     self.show_select = false;

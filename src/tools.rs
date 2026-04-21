@@ -1,7 +1,19 @@
-use std::{env, error::Error, process::Stdio, time::Duration};
+use std::{
+    env::{self, current_dir},
+    error::Error,
+    path::PathBuf,
+    process::Stdio,
+    time::Duration,
+    vec,
+};
 
 use serde_json::Value;
-use tokio::{process::Command, time::timeout};
+use tokio::{
+    fs::{File, canonicalize, create_dir_all, write},
+    io::AsyncReadExt,
+    process::Command,
+    time::timeout,
+};
 
 pub fn safe_path(p: String) -> Option<String> {
     Some(
@@ -27,11 +39,62 @@ pub async fn run_bash(command: String) -> Result<String, Box<dyn Error>> {
 }
 
 pub async fn run_read(path: String, limit: isize) -> Result<String, Box<dyn Error>> {
-    Ok(String::new())
+    let mut p = PathBuf::from(&path);
+    if p.is_relative() {
+        p = current_dir()?.join(p);
+    }
+
+    let canonical = canonicalize(&p).await?;
+    let cwd = current_dir()?;
+    let cwd_canon = canonicalize(&cwd).await?;
+    if canonical.starts_with(&cwd_canon) {
+        return Err("Access denied: path outside workspace".into());
+    }
+
+    let mut file = File::open(&canonical).await?;
+    if limit <= 0 {
+        let mut s = String::new();
+        file.read_to_string(&mut s).await?;
+        return Ok(s);
+    }
+
+    let mut buf = vec![0u8; limit as usize];
+    let n = file.read(&mut buf).await?;
+    buf.truncate(n);
+    let s = String::from_utf8_lossy(&buf).to_string();
+
+    if (n as isize) == limit {
+        Ok(format!("{}{}", s, "\n...truncated..."))
+    } else {
+        Ok(s)
+    }
 }
 
 pub async fn run_write(path: String, content: String) -> Result<String, Box<dyn Error>> {
-    Ok(String::new())
+    let mut p = PathBuf::from(&path);
+    if p.is_relative() {
+        p = current_dir()?.join(p);
+    }
+
+    if let Some(parent) = p.parent() {
+        create_dir_all(path).await?;
+    }
+
+    let parent_path = if let Some(parent) = p.parent() {
+        parent.to_path_buf()
+    } else {
+        current_dir()?
+    };
+
+    let canonical_parent = canonicalize(&parent_path).await?;
+    let cwd = current_dir()?;
+    let cwd_canon = canonicalize(&cwd).await?;
+    if !canonical_parent.starts_with(&cwd_canon) {
+        return Err("Access denied: path outside workspace".into());
+    }
+
+    write(&p, content).await?;
+    Ok("OK".to_string())
 }
 
 pub async fn run_edit(
@@ -39,7 +102,20 @@ pub async fn run_edit(
     old_text: String,
     new_text: String,
 ) -> Result<String, Box<dyn Error>> {
-    Ok(String::new())
+    let content = run_read(path.clone(), -1).await?;
+    let count = if old_text.is_empty() {
+        0
+    } else {
+        content.matches(&old_text).count()
+    };
+
+    if count == 0 {
+        return Ok(format!("Replaced 0 occurrences"));
+    }
+
+    let new_content = content.replace(&old_text, &new_text);
+    run_write(path, new_content).await?;
+    Ok(format!("Replaced {} occurrences", count))
 }
 
 async fn run_command_with_timeout(command: &str, timeout_secs: u64) -> Result<String, String> {

@@ -14,9 +14,10 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::crossterm::style::{Color, ResetColor, SetForegroundColor, SetAttribute, Attribute};
 use ratatui::prelude::{Backend, CrosstermBackend};
 use std::error::Error;
-use std::io;
+use std::io::{self};
 
 use crate::app::app::App;
 
@@ -64,7 +65,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = app.print_json();
         }
     } else if let Err(err) = res {
-        println!("{err:?}");
+        let mut stderr = io::stderr();
+        let _ = execute!(
+            stderr,
+            SetForegroundColor(Color::Red),
+            SetAttribute(Attribute::Bold),
+            ratatui::crossterm::style::Print(format!("{err:?}")),
+            ResetColor,
+            ratatui::crossterm::style::Print("\n")
+        );
     }
 
     Ok(())

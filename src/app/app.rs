@@ -1,4 +1,6 @@
 use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::execute;
+use ratatui::crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use ratatui::layout::Layout;
 use ratatui::prelude::*;
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -45,7 +47,14 @@ impl App {
     }
 
     pub fn print_json(&self) -> Result<(), ()> {
-        println!("结束");
+        let _ = execute!(
+            std::io::stdout(),
+            SetForegroundColor(Color::Green),
+            SetAttribute(Attribute::Bold),
+            ratatui::crossterm::style::Print("结束"),
+            ResetColor,
+            ratatui::crossterm::style::Print("\n")
+        );
         Ok(())
     }
 }

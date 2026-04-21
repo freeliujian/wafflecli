@@ -1,5 +1,5 @@
 use crate::app::app::ModeType;
-use crate::llm::request_llm;
+use crate::llm::request_llm::{Message, MessageRole};
 use crate::router::route::PageStatus;
 use crate::router::{router::Action, screen::Screen};
 use indoc::formatdoc;
@@ -11,18 +11,6 @@ use ratatui::widgets::{
 use std::env;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
-
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: MessageRole,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MessageRole {
-    User,
-    Assistant,
-}
 
 #[derive(Debug, Clone)]
 pub struct SelectItem {
@@ -44,7 +32,7 @@ pub struct MainScreen {
     filtered_items: Vec<SelectItem>,
     select_scroll_offset: usize,
     select_visible_count: usize,
-    messages: Vec<ChatMessage>,
+    messages: Vec<Message>,
     content_scroll: usize,
     history: Vec<String>,
     history_index: Option<usize>,
@@ -112,7 +100,7 @@ impl MainScreen {
 
     pub fn add_user_message(&mut self, content: String) {
         if !content.trim().is_empty() {
-            self.messages.push(ChatMessage {
+            self.messages.push(Message {
                 role: MessageRole::User,
                 content,
             });
@@ -121,7 +109,7 @@ impl MainScreen {
     }
 
     pub fn add_assistant_message(&mut self, content: String) {
-        self.messages.push(ChatMessage {
+        self.messages.push(Message {
             role: MessageRole::Assistant,
             content,
         });
@@ -209,6 +197,12 @@ impl MainScreen {
                     lines.push(Line::from(vec![prefix, content]));
                     lines.push(Line::from(""));
                 }
+                MessageRole::System => {
+                    let prefix = Span::styled("⚙ ", Style::default().fg(Color::Magenta).bold());
+                    let content = Span::styled(&msg.content, Style::default().fg(Color::DarkGray));
+                    lines.push(Line::from(vec![prefix, content]));
+                    lines.push(Line::from(""));
+                }
             }
         }
 
@@ -257,11 +251,11 @@ impl MainScreen {
 
         let title_lines = vec![
             Line::from(vec![
-                Span::from(format!("{} {}", welcome, self.version)).green(),
+                Span::styled(format!("{} {}", welcome, self.version), Style::default().fg(Color::Green)),
             ]),
             Line::from(" "),
             Line::from(vec![
-                Span::from(format!("cwd: {}", self.dir_name)).dark_gray(),
+                Span::styled(format!("cwd: {}", self.dir_name), Style::default().fg(Color::DarkGray)),
             ]),
         ];
 
@@ -517,6 +511,7 @@ impl Screen for MainScreen {
                                     match m.role {
                                         MessageRole::User => "user".to_string(),
                                         MessageRole::Assistant => "assistant".to_string(),
+                                        MessageRole::System => "system".to_string(),
                                     },
                                     m.content.clone(),
                                 )

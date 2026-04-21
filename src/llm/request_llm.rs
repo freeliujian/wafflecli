@@ -1,24 +1,11 @@
+use crate::tools::{Tool, ToolExecutor, get_tool_definitions};
 use reqwest;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::style::{Color, ResetColor, SetForegroundColor};
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Value;
 use std::env;
 use std::error::Error;
-
-use crate::tools::run_bash;
-
-#[derive(Serialize, Debug, Clone)]
-struct Tool {
-    #[serde(rename = "type")]
-    type_: String,
-    function: ToolFunction,
-}
-
-#[derive(Serialize, Debug, Clone)]
-struct ToolFunction {
-    name: String,
-    description: String,
-    parameters: Value,
-}
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -30,10 +17,49 @@ struct ChatRequest {
     tool_choice: Option<String>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Message {
-    pub role: String,
+    pub role: MessageRole,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageRole {
+    User,
+    Assistant,
+    System,
+}
+
+impl MessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+        }
+    }
+}
+
+impl Serialize for MessageRole {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MessageRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "user" => Ok(MessageRole::User),
+            "assistant" => Ok(MessageRole::Assistant),
+            "system" => Ok(MessageRole::System),
+            _ => Err(format!("Unknown message role: {}", s)),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -102,6 +128,14 @@ pub struct LoopState {
     client: reqwest::Client,
 }
 
+async fn execute_tool(name: &str, args: &Value) -> String {
+    let executor = ToolExecutor;
+    match executor.execute(name, args.clone()).await {
+        Ok(output) => output,
+        Err(e) => format!("Error: {}", e),
+    }
+}
+
 impl LoopState {
     pub fn new(list: Vec<Message>) -> Self {
         let client = reqwest::Client::new();
@@ -113,118 +147,9 @@ impl LoopState {
         }
     }
 
-    fn extract_text(&mut self, content: Option<&[Value]>) -> Option<String> {
-        let content: &[Value] = match content {
-            Some(list) if !list.is_empty() => list,
-            _ => return Some(String::new()),
-        };
-
-        let mut texts = Vec::new();
-
-        for block in content {
-            let text = match block {
-                Value::Object(map) => map.get("text").and_then(|v| v.as_str()),
-                _ => None,
-            };
-
-            if let Some(t) = text {
-                if !t.trim().is_empty() {
-                    texts.push(t);
-                }
-            }
-        }
-
-        Some(texts.join("\n").trim().to_string())
-    }
-
-    async fn execute_tool_calls(
-        &self,
-        response_content: Vec<Value>,
-    ) -> Result<Vec<ToolResult>, Box<dyn Error>> {
-        let mut results = Vec::new();
-
-        for block in response_content {
-            let type_str = match block.get("type").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => continue,
-            };
-
-            if type_str != "tool_use" {
-                continue;
-            }
-
-            let command = match block
-                .get("input")
-                .and_then(|i| i.get("command"))
-                .and_then(|c| c.as_str())
-            {
-                Some(cmd) => cmd.to_string(),
-                None => {
-                    eprintln!("Warning: tool_use block missing command");
-                    continue;
-                }
-            };
-
-            let tool_id = block
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            println!("\x1b[33m$ {}\x1b[0m", command);
-
-            match run_bash(command).await {
-                Ok(output) => {
-                    let display_output = if output.len() > 200 {
-                        &output[..200]
-                    } else {
-                        &output
-                    };
-                    println!("{}", display_output);
-
-                    results.push(ToolResult {
-                        type_: "tool_result".to_string(),
-                        tool_use_id: tool_id,
-                        content: output,
-                    });
-                }
-                Err(e) => {
-                    let error_msg = format!("Error: {}", e);
-                    eprintln!("{}", error_msg);
-
-                    results.push(ToolResult {
-                        type_: "tool_result".to_string(),
-                        tool_use_id: tool_id,
-                        content: error_msg,
-                    });
-                }
-            }
-        }
-
-        Ok(results)
-    }
-
-    async fn run_one_turn(&mut self) -> Result<Option<Vec<ToolResult>>, Box<dyn Error>> {
-        let tool = Tool {
-            type_: String::from("function"),
-            function: ToolFunction {
-                name: String::from("bash"),
-                description: String::from("Run a shell command in the current workspace."),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The shell command to execute"
-                        }
-                    },
-                    "required": ["command"]
-                }),
-            },
-        };
-
-        let client = self.client.clone();
-        let api_key: String = String::from("sk-ieTXY0Hs8XH8OUUhoKAAfoJPlJF2K5k52d9Vbg8MVOwKRC9J");
+    pub async fn agent_loop(&mut self) -> Result<(), Box<dyn Error>> {
+        let api_key: String = env::var("MOONSHOT_API_KEY")
+            .unwrap_or_else(|_| "sk-ieTXY0Hs8XH8OUUhoKAAfoJPlJF2K5k52d9Vbg8MVOwKRC9J".to_string());
         let current_dir = env::current_dir().unwrap_or_default();
         let env_path = current_dir.to_string_lossy().into_owned();
 
@@ -233,118 +158,128 @@ impl LoopState {
             env_path
         );
 
-        let mut all_messages = vec![Message {
-            role: "system".to_string(),
-            content: system_prompt,
-        }];
-        let cp_messages = self.messages.clone();
-        all_messages.extend(cp_messages);
+        let tools = get_tool_definitions();
 
-        let request_body = ChatRequest {
-            model: "kimi-k2.5".to_string(),
-            messages: all_messages,
-            temperature: Some(1.0),
-            max_tokens: Some(8000),
-            tools: Some(vec![tool]),
-            tool_choice: Some("auto".to_string()),
-        };
+        loop {
+            let mut all_messages = vec![Message {
+                role: MessageRole::System,
+                content: system_prompt.clone(),
+            }];
+            all_messages.extend(self.messages.clone());
 
-        let resp = client
-            .post("https://api.moonshot.cn/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+            let request_body = ChatRequest {
+                model: "kimi-k2.5".to_string(),
+                messages: all_messages,
+                temperature: Some(1.0),
+                max_tokens: Some(8000),
+                tools: Some(tools.clone()),
+                tool_choice: Some("auto".to_string()),
+            };
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let error_text = resp.text().await.unwrap_or_default();
-            return Err(format!("Moonshot 错误，status 为：{}: {}", status, error_text).into());
-        }
+            let resp = self
+                .client
+                .post("https://api.moonshot.cn/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await?;
 
-        let result: ChatResponse = resp.json().await?;
-
-        if let Some(choice) = result.choices.first() {
-            let message = &choice.message;
-
-            if let Some(content) = &message.content {
-                self.messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: content.clone(),
-                });
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let error_text = resp.text().await.unwrap_or_default();
+                return Err(format!("Moonshot error, status: {}: {}", status, error_text).into());
             }
 
-            if let Some(tool_calls) = &message.tool_calls {
-                println!("模型请求调用工具:");
-                for tool_call in tool_calls {
-                    println!(
-                        "  - 工具: {}, 参数: {}",
-                        tool_call.function.name, tool_call.function.arguments
-                    );
+            let result: ChatResponse = resp.json().await?;
+
+            if let Some(choice) = result.choices.first() {
+                let message = &choice.message;
+
+                if let Some(tool_calls) = &message.tool_calls {
+                    let tool_calls_display: Vec<String> = tool_calls
+                        .iter()
+                        .map(|tc| format!("{}({})", tc.function.name, tc.function.arguments))
+                        .collect();
+                    self.messages.push(Message {
+                        role: MessageRole::Assistant,
+                        content: format!("Tool calls: {}", tool_calls_display.join(", ")),
+                    });
+
+                    for tool_call in tool_calls {
+                        let tool_name = &tool_call.function.name;
+                        let tool_id = &tool_call.id;
+                        let args: Value = serde_json::from_str(&tool_call.function.arguments)
+                            .unwrap_or(Value::Null);
+
+                        let mut stdout = std::io::stdout();
+                        let _ = execute!(
+                            stdout,
+                            SetForegroundColor(Color::Yellow),
+                            ratatui::crossterm::style::Print(format!("> {}", tool_name)),
+                            ResetColor,
+                            ratatui::crossterm::style::Print("\n")
+                        );
+
+                        let output = execute_tool(tool_name, &args).await;
+
+                        let display_output = if output.len() > 200 {
+                            format!("{}...", &output[..200])
+                        } else {
+                            output.clone()
+                        };
+                        let mut stdout = std::io::stdout();
+                        let _ = execute!(
+                            stdout,
+                            SetForegroundColor(Color::Cyan),
+                            ratatui::crossterm::style::Print(display_output),
+                            ResetColor,
+                            ratatui::crossterm::style::Print("\n")
+                        );
+
+                        self.messages.push(Message {
+                            role: MessageRole::User,
+                            content: format!("Tool result ({}): {}", tool_id, output),
+                        });
+                    }
+
+                    if let Some(usage) = result.usage {
+                        let mut stdout = std::io::stdout();
+                        let _ = execute!(
+                            stdout,
+                            SetForegroundColor(Color::DarkGrey),
+                            ratatui::crossterm::style::Print(format!("Token usage: {}", usage.total_tokens)),
+                            ResetColor,
+                            ratatui::crossterm::style::Print("\n")
+                        );
+                    }
+
+                    continue;
                 }
 
-                let tool_calls_value: Vec<Value> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "input": {
-                                "command": tc.function.arguments
-                            }
-                        })
-                    })
-                    .collect();
-
-                let tool_results = self.execute_tool_calls(tool_calls_value).await?;
-
-                for result in &tool_results {
+                if let Some(content) = &message.content {
                     self.messages.push(Message {
-                        role: "user".to_string(),
-                        content: format!(
-                            "Tool result ({}): {}",
-                            result.tool_use_id, result.content
-                        ),
+                        role: MessageRole::Assistant,
+                        content: content.clone(),
                     });
                 }
 
                 if let Some(usage) = result.usage {
-                    println!("Token 使用: {}", usage.total_tokens);
+                    let mut stdout = std::io::stdout();
+                    let _ = execute!(
+                        stdout,
+                        SetForegroundColor(Color::DarkGrey),
+                        ratatui::crossterm::style::Print(format!("Token usage: {}", usage.total_tokens)),
+                        ResetColor,
+                        ratatui::crossterm::style::Print("\n")
+                    );
                 }
 
-                return Ok(Some(tool_results));
+                return Ok(());
             }
 
-            if let Some(usage) = result.usage {
-                println!("Token 使用: {}", usage.total_tokens);
-            }
+            return Err("No choices returned from Moonshot API".into());
         }
-
-        Err("调用失败".into())
-    }
-
-    pub async fn agent_loop(&mut self) -> Result<(), Box<dyn Error>> {
-        loop {
-            match self.run_one_turn().await {
-                Ok(Some(_)) => {
-                    self.turn_count += 1;
-                    if self.turn_count > 10 {
-                        self.transition_reason = Some("达到最大轮数限制".to_string());
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    self.transition_reason = Some("对话自然结束".to_string());
-                    break;
-                }
-                Err(e) => {
-                    self.transition_reason = Some(format!("错误: {}", e));
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -353,7 +288,10 @@ pub async fn run_agent_from_pairs(
 ) -> Result<Vec<(String, String)>, Box<dyn Error>> {
     let list: Vec<Message> = messages
         .into_iter()
-        .map(|(role, content)| Message { role, content })
+        .map(|(role, content)| Message {
+            role: role.parse::<MessageRole>().expect("Invalid message role"),
+            content,
+        })
         .collect();
 
     let mut state = LoopState::new(list);
@@ -362,7 +300,7 @@ pub async fn run_agent_from_pairs(
     let out = state
         .messages
         .into_iter()
-        .map(|m| (m.role, m.content))
+        .map(|m| (m.role.as_str().to_string(), m.content))
         .collect();
 
     Ok(out)
